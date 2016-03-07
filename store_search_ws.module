@@ -1,0 +1,310 @@
+<?php
+
+define('STORE_SEARCH_INDEX_SLICE_LIMIT', 10);
+
+/**
+ * Implements hook_menu().
+ */
+function store_search_ws_menu() {
+
+  $items['admin/config/store_search_ws'] = array(
+    'title' => 'Store Locator Search ws',
+    'description' => t('Store Locator ws settings page'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('store_search_ws_admin'),
+    'access arguments' => array('administer store locator search ws'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_permission
+ */
+function store_search_ws_permission() {
+  return array(
+    'administer store locator search ws' => array(
+      'title' => t('Administer Store Locator Search ws'),
+      'description' => t('Perform administration tasks for the ws.'),
+    ),
+  );
+}
+
+/**
+ * Admin settings.
+ * This page provides configuration options for the store locator.
+ *
+ */
+function store_search_ws_admin() {
+  $form = array();
+
+  $form['store_ws_active'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Activate the ws indexation'),
+    '#default_value' => variable_get('store_ws_active', 1),
+  );
+
+  $form['ws_settings'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('ws settings'),
+    '#weight' => 7,
+    '#collapsible' => TRUE,
+    '#collapsed' => FALSE,
+  );
+
+  $form['ws_settings']['store_ws_server'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Server url (host:port)'),
+    '#default_value' => variable_get('store_ws_server', ''),
+    '#size' => 100,
+    '#maxlength' => 100,
+    '#description' => t('Url (host:port)'),
+    '#required' => TRUE,
+  );
+
+  $form['ws_settings']['store_ws_source'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Source'),
+    '#default_value' => variable_get('store_ws_source', 'CPORTAILFR'),
+    '#size' => 100,
+    '#maxlength' => 100,
+    '#description' => t('Source'),
+    '#required' => TRUE,
+  );
+
+  $form['ws_settings']['store_ws_source_content_type'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Source Content Type'),
+    '#default_value' => variable_get('store_ws_source_content_type', ''),
+    '#size' => 100,
+    '#maxlength' => 100,
+    '#description' => t('Source Content Type'),
+    '#required' => TRUE,
+  );
+
+  $form['ws_settings']['store_ws_content_type'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Content Type'),
+    '#default_value' => variable_get('store_ws_content_type', 'MAGASIN'),
+    '#size' => 100,
+    '#maxlength' => 100,
+    '#description' => t('Content Type'),
+    '#required' => TRUE,
+  );
+
+  $form['ws_settings']['store_ws_content_id'] = array(
+    '#type' => 'textfield',
+    '#title' => t('ID'),
+    '#default_value' => variable_get('store_ws_content_id', 'CPORTAILFR-STORE'),
+    '#size' => 100,
+    '#maxlength' => 100,
+    '#description' => t('ID for XML'),
+    '#required' => TRUE,
+  );
+
+  $form['ws_index'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Index stores'),
+    '#weight' => 100,
+    '#collapsible' => TRUE,
+    '#collapsed' => FALSE,
+  );
+
+  $form['ws_index']['index_all_stores'] = array(
+    '#type' => 'submit',
+    '#value' => t('Bulk index all stores'),
+    '#submit' => array('store_search_ws_form_batch_index_all_submit'),
+  );
+
+  return system_settings_form($form);
+}
+
+/**
+ * ws index submit handler.
+ */
+function store_search_ws_form_batch_index_all_submit($form, &$form_state) {
+  $batch = store_search_ws_batch_action();
+  batch_set($batch);
+}
+
+/**
+ * Index all store entities using batch.
+ */
+function store_search_ws_batch_action() {
+  $operations = array();
+
+  $operations[] = array(
+    'store_search_ws_index_stores_callback',
+    array(t('(Indexed all stores)')),
+  );
+
+  $batch = array(
+    'operations' => $operations,
+    'finished' => 'store_search_ws_index_stores_finished',
+    'title' => t('Stores ws bulk index'),
+    'init_message' => t('Stores ws index starting ...'),
+    'progress_message' => t('Indexing stores ......'),
+    'error_message' => t('Stores ws index has encountered an error.'),
+  );
+  return $batch;
+}
+
+/**
+ * Batch operation for indexing a slice of stores.
+ */
+function store_search_ws_index_stores_callback($operation_details, &$context) {
+
+  // Store information needed to track progression between successive calls.
+  if (empty($context['sandbox'])) {
+    $context['sandbox'] = array();
+    $context['sandbox']['progress'] = 0;
+    $context['sandbox']['store_ws_indexed'] = 0;
+
+    // Get the total number of loaded stores.
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'store');
+    $result = $query->count()->execute();
+
+    $context['sandbox']['stores_nr'] = $result;
+    $context['sandbox']['max'] = ceil($result / STORE_SEARCH_INDEX_SLICE_LIMIT);
+  }
+
+  // Load slices of 100 stores to prevent memory peaks.
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'store');
+  $query->range($context['sandbox']['progress'] * STORE_SEARCH_INDEX_SLICE_LIMIT, STORE_SEARCH_INDEX_SLICE_LIMIT);
+  $result = $query->execute();
+
+  if (isset($result['store'])) {
+    $sids = array_keys($result['store']);
+    if ($stores = store_load_multiple($sids)) {
+      foreach ($stores as $store) {
+        if (store_search_ws_indexing_store($store)) {
+          $context['sandbox']['store_ws_indexed'] += 1;
+        }
+      }
+
+      $context['results'][] = t('Indexed @stores_nr stores already.', array('@stores_nr' => $context['sandbox']['store_ws_indexed']));
+      $context['sandbox']['progress']++;
+    }
+
+    $context['message'] = t('Indexed @current of @total stores',
+      array(
+        '@current' => $context['sandbox']['progress'] * STORE_SEARCH_INDEX_SLICE_LIMIT,
+        '@total'   => $context['sandbox']['stores_nr'],
+      ));
+
+    // Inform the batch engine that we are not finished, and provide an
+    // estimation of the completion level we reached.
+    $context['finished'] = empty($context['sandbox']['max']) ? 1 : $context['sandbox']['progress'] / $context['sandbox']['max'];
+  }
+  else {
+    $context['finished'] = 1;
+  }
+}
+
+/**
+ * Batch 'finished' callback.
+ */
+function store_search_ws_index_stores_finished($success, $results, $operations) {
+  if ($success) {
+    // We display the number of stores we processed.
+    drupal_set_message(t('@count sets of @limit stores processed.', array(
+      '@count' => count($results),
+      '@limit' => STORE_SEARCH_INDEX_SLICE_LIMIT,
+    )));
+
+    drupal_set_message(t('Result Log "%final"', array('%final' => end($results))));
+  }
+  else {
+    // An error occurred.
+    $error_operation = reset($operations);
+    $log_text = t('An error occurred while processing @operation with arguments : @args');
+    $log_values = array(
+      '@operation' => $error_operation[0],
+    );
+
+    watchdog('store_search_ws', $log_text, $log_values, WATCHDOG_ERROR);
+    drupal_set_message(t('An error occurred while processing @operation .', array('@operation' => $error_operation[0])), 'error');
+  }
+}
+
+/**
+ * Handles the indexing of stores.
+ *
+ * @param Store $store
+ *   Fully loaded store object.
+ *
+ * @return bool
+ *   TRUE if WS call worked, FALSE if it didn't.
+ */
+function store_search_ws_indexing_store($store) {
+  if (variable_get('store_ws_active') == 1) {
+    $image = '';
+    if (!empty($store->image)) {
+      //watchdog('store_search_ws_indexing_stores IMAGE', $store->image_uri);
+      $image = $store->image_uri;
+    }
+
+    // Remove HTML img tag from cached value.
+    $dom = new DOMDocument();
+    $dom->loadHTML($image);
+
+    // Make sure that the dom exists to avoid fatal error.
+    if (!empty($dom->getElementsByTagName('img')->item(0))) {
+      $image = $dom->getElementsByTagName('img')->item(0)->getAttribute('src');
+    }
+
+    $resume = '';
+    if (!empty($store->address)) {
+      $resume .= $store->address;
+    }
+    $resume .= '&lt;br /&gt;';
+    //'<![CDATA[<br>]]>';
+    if (!empty($store->zipcode)) {
+      $resume .= $store->zipcode . ' ' . $store->city;
+    }
+    else {
+      $resume .= $store->city;
+    }
+    if (!empty($store->contact_phone)) {
+      $resume .= '&lt;br /&gt;' . t('Phone') . ' : ' . $store->contact_phone;
+    }
+
+    //watchdog('store_search_ws_indexing_stores','RESUME='.$resume );
+    $xml_data = '<?xml version="1.0" encoding="utf-8"?>';
+    $xml_data .= '<IdxDoc>';
+    $xml_data .= '<Url>' . t('store') . '/' . $store->clean_url . '</Url>';
+    $xml_data .= '<Title>' . $store->name . '</Title>';
+	// Other XML information.
+    $xml_data .= '</IdxDoc>';
+    $xml_data .= '</index>\n';
+    $xml_data .= '#DREENDDATA';
+
+    $ws = variable_get('store_ws_server', 'url');
+    $URL = $ws . '/DREADDDATA?DREDName=' . variable_get('store_ws_source', '');
+    $CURL = curl_init($URL);
+    curl_setopt($CURL, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($CURL, CURLOPT_SSL_VERIFYPEER, 0);
+    curl_setopt($CURL, CURLOPT_POST, 1);
+    curl_setopt($CURL, CURLOPT_HTTPHEADER, array('Content-Type: application/xml'));
+    curl_setopt($CURL, CURLOPT_POSTFIELDS, $xml_data);
+    curl_setopt($CURL, CURLOPT_RETURNTRANSFER, 1);
+    $output = curl_exec($CURL);
+
+    if (!curl_errno($CURL)) {
+      return TRUE;
+    }
+    else {
+      //Error
+      watchdog('store_search_ws_indexing_store->ERROR', curl_error($CURL));
+      return FALSE;
+    }
+    curl_close($CURL);
+  }
+  else {
+    watchdog('store_search_ws_indexing_store', 'ws indexation no active');
+    return FALSE;
+  }
+}
